@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
+import type { MetricsProvider } from "../src/provider.ts";
 import { parseRetryAfter, SyncService } from "../src/sync.ts";
 import { M, setup, WINDOW } from "./helpers.ts";
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Provider that holds each response until `release()`, to observe what runs concurrently. */
+function gatedProvider() {
+  const started: string[] = [];
+  const gates: (() => void)[] = [];
+  const provider: MetricsProvider = {
+    fetchPosts: async (req) => {
+      started.push(req.accountId);
+      await new Promise<void>((resolve) => gates.push(resolve));
+      return { posts: [{ id: "p1", publishedAt: "2026-10-05T10:00:00.000Z", metrics: M(10), metricsAsOf: "2026-10-12T11:00:00.000Z" }] };
+    },
+  };
+  return { provider, started, release: () => gates.shift()?.() };
+}
 
 describe("idempotência", () => {
   it("o mesmo snapshot buscado de novo não muda nem duplica o número", async () => {
@@ -80,13 +97,50 @@ describe("idempotência", () => {
   });
 
   it("dois syncs simultâneos da mesma conexão rodam em fila", async () => {
-    const { provider, store, sync, connection } = setup();
+    const { store, clock, connection } = setup();
+    const { provider, started, release } = gatedProvider();
+    const service = new SyncService(provider, store, clock);
+
+    const first = service.sync(connection, WINDOW);
+    const second = service.sync(connection, WINDOW);
+    await flush();
+    expect(started).toHaveLength(1); // o segundo não chamou o provedor enquanto o primeiro não terminou
+
+    release();
+    await first;
+    await flush();
+    expect(started).toHaveLength(2);
+
+    release();
+    await second;
+    expect(store.postsOf(connection.id)).toHaveLength(1);
+  });
+
+  it("conexões diferentes não esperam uma pela outra", async () => {
+    const { store, clock, connection } = setup();
+    const other = store.addConnection({ platform: "x", account_id: "b", access_token: "t" });
+    const { provider, started, release } = gatedProvider();
+    const service = new SyncService(provider, store, clock);
+
+    const a = service.sync(connection, WINDOW);
+    const b = service.sync(other, WINDOW);
+    await flush();
+    expect(started).toHaveLength(2);
+
+    release();
+    release();
+    await Promise.all([a, b]);
+  });
+
+  it("sync que falha não trava a fila da conexão", async () => {
+    const { provider, store, sync, connection } = setup({ maxAttempts: 1 });
     provider.setPost("p1", "2026-10-05T10:00:00.000Z", M(1000));
+    provider.failNext({ kind: "http", status: 500 });
 
-    const [a, b] = await Promise.all([sync.sync(connection, WINDOW), sync.sync(connection, WINDOW)]);
+    const [failed, next] = await Promise.all([sync.sync(connection, WINDOW), sync.sync(connection, WINDOW)]);
 
-    expect(a.counts.inserted).toBe(1);
-    expect(b.counts).toMatchObject({ inserted: 0, unchanged: 1 });
+    expect(failed.status).toBe("failed");
+    expect(next.status).toBe("succeeded");
     expect(store.postsOf(connection.id)).toHaveLength(1);
   });
 });

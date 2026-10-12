@@ -38,7 +38,7 @@ npm run dev       # http://127.0.0.1:3004 (dados em memória, provedor simulado 
 - **Dado inválido:** post com id vazio, data ilegível ou contador negativo/`NaN` é descartado e contado em `counts.invalid`. Nunca sobrescreve o número guardado.
 - **Mesmo `metricsAsOf` com contadores diferentes:** conta como o mesmo snapshot (`unchanged`); o primeiro vale.
 - **Falha no meio:** cada página é gravada ao chegar. Se a página 2 falha, a 1 fica, e rodar o sync de novo é seguro pelo mesmo motivo.
-- Syncs da mesma conexão rodam em fila. A fila dá ordem previsível e evita chamadas duplicadas ao provedor; a idempotência vem do `upsert`, não dela.
+- Syncs da mesma conexão rodam em fila. A fila dá ordem previsível e evita chamadas duplicadas ao provedor; a idempotência vem do `upsert`, não dela. Os testes usam um provedor com "portão" para provar que o segundo sync só chama o provedor depois do primeiro terminar, e que conexões diferentes não se bloqueiam.
 
 ## Quando a métrica foi buscada
 
