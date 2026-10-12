@@ -72,4 +72,8 @@ Os testes de 429 (`test/sync.test.ts`) usam o relógio controlado: conferem que 
 - **Feito com IA:** Claude Code (Sonnet 5.5) escreveu o código, os testes e este README a partir do enunciado.
 - **Execução:** a IA rodou `npm test`, `npm run typecheck` e `curl` contra a API local.
 - **Sanity check:** um subagente do Claude Code, sem o histórico da conversa, leu só o enunciado e o repositório, rodou os testes, subiu a API e mutou uma cópia do código para ver quais testes continuavam verdes. Achou e foi corrigido: `Retry-After` malformado (`"1.5"`, `"-5"`) virava espera zero; datas como `since: "1"` eram aceitas; testes não cobriam a fronteira `until`, o snapshot mais novo dentro da mesma resposta e `last_fetched_at` com valores diferentes. Apontou ainda a falta de teto total de espera e de validação dos dados do provedor, corrigidas numa segunda rodada, em que outro subagente avaliou excesso de engenharia; cortei `/health`, `first_fetched_at`, `last_sync_id`, `pages`, a janela de 90 dias e testes repetidos.
-- **Revisado por mim:** (preencher após a sua revisão)
+- **Revisado por mim:**
+  - Li `upsert` e `fetchPage` e conferi que o upsert substitui os contadores em vez de somar. Troquei por soma e vi falharem os testes de snapshot novo e de janela sobreposta.
+  - Percebi que o teste da fila por conexão passaria mesmo sem a fila. Pedi uma forma de testá-la e conferi o teste com provedor com "portão": removendo a fila, ele falha.
+  - Rodei os testes e um roteiro manual com 429, 503 e snapshot novo, e os resultados bateram com o esperado.
+  - Concordei com falhar na hora quando o `Retry-After` passa do teto, em vez de esperar menos, porque isso só traria outro 429.
