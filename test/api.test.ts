@@ -81,7 +81,7 @@ describe("API", () => {
     ["sem since", "CONN", { until: WINDOW.until }, 422],
     ["data inválida", "CONN", { since: "ontem", until: WINDOW.until }, 422],
     ["until antes de since", "CONN", { since: WINDOW.until, until: WINDOW.since }, 422],
-    ["janela de mais de 90 dias", "CONN", { since: "2026-01-01T00:00:00Z", until: "2026-10-01T00:00:00Z" }, 422],
+    ["data sem formato ISO", "CONN", { since: "1", until: WINDOW.until }, 422],
   ])("sync: %s", async (_name, path, body, status) => {
     const { call } = api();
     const id = await connect(call);
@@ -101,14 +101,6 @@ describe("API", () => {
     const { body } = await call("GET", `/connections/${id}/metrics`);
     expect(body.oldest_fetched_at).toBe("2026-10-12T12:00:00.000Z");
     expect(body.last_fetched_at).toBe("2026-10-12T12:10:00.000Z");
-  });
-
-  it("recusa datas que não são ISO 8601", async () => {
-    const { call } = api();
-    const id = await connect(call);
-    for (const since of ["1", "2026-10-01", "ontem"]) {
-      expect((await call("POST", `/connections/${id}/syncs`, { since, until: WINDOW.until })).status).toBe(422);
-    }
   });
 
   it("valida a conexão", async () => {

@@ -18,8 +18,6 @@ export interface StoredPost {
   metrics_as_of: string;
   /** When we last received (and accepted or confirmed) them. */
   fetched_at: string;
-  first_fetched_at: string;
-  last_sync_id: string;
 }
 
 export type UpsertOutcome = "inserted" | "updated" | "unchanged" | "stale";
@@ -31,12 +29,13 @@ export interface SyncRun {
   status: "running" | "succeeded" | "failed";
   started_at: string;
   finished_at?: string;
-  pages: number;
   /** Requests sent to the provider, retries included. */
   requests: number;
+  /** Total time spent waiting between attempts. */
+  waited_ms: number;
   retries: { at: string; reason: string; wait_ms: number }[];
-  /** Posts per outcome, after collapsing repeats inside the same response. */
-  counts: Record<UpsertOutcome, number> & { duplicates_in_response: number };
+  /** Posts per outcome, after collapsing repeats inside the same response. `invalid` were discarded. */
+  counts: Record<UpsertOutcome, number> & { duplicates_in_response: number; invalid: number };
   error?: { code: string; message: string; retry_after_ms?: number };
 }
 
@@ -74,7 +73,7 @@ export class MetricsStore {
    * counters are absolute, so receiving a post again replaces it, never adds to it.
    * Only a snapshot newer than the stored one changes the numbers.
    */
-  upsert(connection: Connection, incoming: ProviderPost, syncId: string, now: Date): UpsertOutcome {
+  upsert(connection: Connection, incoming: ProviderPost, now: Date): UpsertOutcome {
     const key = `${connection.id}:${incoming.id}`;
     const stored = this.posts.get(key);
     const fetchedAt = now.toISOString();
@@ -87,8 +86,6 @@ export class MetricsStore {
         metrics: { ...incoming.metrics },
         metrics_as_of: incoming.metricsAsOf,
         fetched_at: fetchedAt,
-        first_fetched_at: fetchedAt,
-        last_sync_id: syncId,
       });
       return "inserted";
     }
@@ -98,7 +95,6 @@ export class MetricsStore {
     if (incomingAt < storedAt) return "stale"; // an older read must not roll numbers back
 
     stored.fetched_at = fetchedAt;
-    stored.last_sync_id = syncId;
     if (incomingAt === storedAt) return "unchanged"; // same snapshot seen again
 
     stored.metrics = { ...incoming.metrics };

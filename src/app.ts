@@ -3,7 +3,6 @@ import { PLATFORMS, type Platform } from "./provider.ts";
 import type { MetricsStore } from "./store.ts";
 import type { SyncService } from "./sync.ts";
 
-export const MAX_WINDOW_DAYS = 90;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
 class HttpError extends Error {
@@ -55,8 +54,6 @@ export function createApp(store: MetricsStore, sync: SyncService) {
     return connection;
   };
 
-  app.get("/health", (c) => c.json({ ok: true }));
-
   app.post("/connections", async (c) => {
     const body = await jsonBody(c.req.raw);
     const platform = text(body.platform, "platform");
@@ -80,9 +77,6 @@ export function createApp(store: MetricsStore, sync: SyncService) {
     const until = instant(body.until, "until");
     if (Date.parse(until) <= Date.parse(since)) {
       throw new HttpError(422, "validation", "until deve ser depois de since");
-    }
-    if (Date.parse(until) - Date.parse(since) > MAX_WINDOW_DAYS * 86_400_000) {
-      throw new HttpError(422, "validation", `a janela pode ter no máximo ${MAX_WINDOW_DAYS} dias`);
     }
     const run = await sync.sync(connection, { since, until });
     if (run.status === "succeeded") return c.json(run);

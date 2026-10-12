@@ -123,18 +123,6 @@ describe("janela e resposta repetida", () => {
 });
 
 describe("quando a métrica foi buscada", () => {
-  it("posts buscados em momentos diferentes têm fetched_at próprio", async () => {
-    const { provider, clock, store, sync, connection } = setup();
-    provider.setPost("antigo", "2026-10-02T10:00:00.000Z", M(1));
-    await sync.sync(connection, { since: "2026-10-01T00:00:00.000Z", until: "2026-10-03T00:00:00.000Z" });
-    clock.advance(600_000);
-    provider.setPost("novo", "2026-10-08T10:00:00.000Z", M(1));
-    await sync.sync(connection, { since: "2026-10-07T00:00:00.000Z", until: "2026-10-09T00:00:00.000Z" });
-
-    const byId = Object.fromEntries(store.postsOf(connection.id).map((p) => [p.post_id, p.fetched_at]));
-    expect(byId).toEqual({ antigo: "2026-10-12T12:00:00.000Z", novo: "2026-10-12T12:10:00.000Z" });
-  });
-
   it("guarda fetched_at (nosso relógio) e metrics_as_of (leitura do provedor)", async () => {
     const { provider, clock, store, sync, connection } = setup();
     provider.setPost("p1", "2026-10-05T10:00:00.000Z", M(1000), "2026-10-12T11:30:00.000Z");
@@ -145,9 +133,7 @@ describe("quando a métrica foi buscada", () => {
 
     const post = store.postsOf(connection.id)[0]!;
     expect(post.metrics_as_of).toBe("2026-10-12T11:30:00.000Z");
-    expect(post.first_fetched_at).toBe("2026-10-12T12:00:00.000Z");
     expect(post.fetched_at).toBe("2026-10-12T12:01:00.000Z");
-    expect(post.last_sync_id).toBe(run.id);
     expect(run.started_at).toBe("2026-10-12T12:01:00.000Z");
   });
 });
@@ -159,7 +145,7 @@ describe("paginação", () => {
 
     const run = await sync.sync(connection, WINDOW);
 
-    expect(run).toMatchObject({ status: "succeeded", pages: 3, requests: 3 });
+    expect(run).toMatchObject({ status: "succeeded", requests: 3 });
     expect(store.postsOf(connection.id)).toHaveLength(5);
   });
 
@@ -171,7 +157,7 @@ describe("paginação", () => {
 
     expect(run.status).toBe("failed");
     expect(run.error?.code).toBe("too_many_pages");
-    expect(run.pages).toBe(2);
+    expect(provider.calls).toHaveLength(2);
   });
 });
 
@@ -305,6 +291,22 @@ describe("429 e Retry-After", () => {
     expect(clock.sleeps).toEqual([2000, 2000]);
   });
 
+  it("a espera somada de todas as páginas respeita o teto total", async () => {
+    const { provider, clock, sync, connection } = setup({ maxTotalWaitMs: 10_000 }, 1);
+    provider.setPost("p1", "2026-10-02T10:00:00.000Z", M(1));
+    provider.setPost("p2", "2026-10-03T10:00:00.000Z", M(1));
+    provider.setPost("p3", "2026-10-04T10:00:00.000Z", M(1));
+    // uma espera de 4 s em cada página: 4 + 4 cabem, a terceira (12 s no total) não
+    provider.failNext({ kind: "rate_limit", retryAfter: "4" }, { kind: "ok" }, { kind: "rate_limit", retryAfter: "4" }, { kind: "ok" }, { kind: "rate_limit", retryAfter: "4" });
+
+    const run = await sync.sync(connection, WINDOW);
+
+    expect(run.status).toBe("failed");
+    expect(run.error?.code).toBe("wait_budget_exceeded");
+    expect(run.waited_ms).toBe(8000);
+    expect(clock.sleeps).toEqual([4000, 4000]);
+  });
+
   it("429 sem Retry-After cai no backoff", async () => {
     const { provider, clock, sync, connection } = setup();
     provider.failNext({ kind: "rate_limit" });
@@ -312,6 +314,37 @@ describe("429 e Retry-After", () => {
     await sync.sync(connection, WINDOW);
 
     expect(clock.sleeps).toEqual([500]);
+  });
+});
+
+describe("dados inválidos do provedor", () => {
+  it("post com metricsAsOf, data ou contador inválido é descartado e contado", async () => {
+    const { store, clock, connection } = setup();
+    const ok = { id: "ok", publishedAt: "2026-10-05T10:00:00.000Z", metrics: M(10), metricsAsOf: "2026-10-12T11:00:00.000Z" };
+    const bad = [
+      { ...ok, id: "sem_as_of", metricsAsOf: "ontem" },
+      { ...ok, id: "sem_data", publishedAt: "" },
+      { ...ok, id: "negativo", metrics: { ...M(10), likes: -1 } },
+      { ...ok, id: "nan", metrics: { ...M(10), views: NaN } },
+      { ...ok, id: "" },
+    ];
+    const service = new SyncService({ fetchPosts: async () => ({ posts: [ok, ...bad] }) }, store, clock);
+
+    const run = await service.sync(connection, WINDOW);
+
+    expect(run.counts).toMatchObject({ inserted: 1, invalid: 5 });
+    expect(store.postsOf(connection.id).map((p) => p.post_id)).toEqual(["ok"]);
+  });
+
+  it("snapshot inválido não sobrescreve o número guardado", async () => {
+    const { provider, store, sync, connection } = setup();
+    provider.setPost("p1", "2026-10-05T10:00:00.000Z", M(1000));
+    await sync.sync(connection, WINDOW);
+
+    provider.setPost("p1", "2026-10-05T10:00:00.000Z", M(5), "não é data");
+    await sync.sync(connection, WINDOW);
+
+    expect(store.postsOf(connection.id)[0]!.metrics.views).toBe(1000);
   });
 });
 

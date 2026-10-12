@@ -17,6 +17,8 @@ export interface SyncConfig {
   maxBackoffMs: number;
   /** Longest Retry-After we are willing to wait. Longer than this fails the sync. */
   maxRetryAfterMs: number;
+  /** Total waiting allowed in one sync, all pages and causes together. */
+  maxTotalWaitMs: number;
   requestTimeoutMs: number;
   /** Guard against a provider that never stops paginating. */
   maxPages: number;
@@ -27,13 +29,14 @@ export const DEFAULT_CONFIG: SyncConfig = {
   baseBackoffMs: 500,
   maxBackoffMs: 8_000,
   maxRetryAfterMs: 60_000,
+  maxTotalWaitMs: 120_000,
   requestTimeoutMs: 10_000,
   maxPages: 200,
 };
 
 class SyncFailure extends Error {
   constructor(
-    public readonly code: "rate_limited" | "retries_exhausted" | "unauthorized" | "provider_error" | "too_many_pages",
+    public readonly code: "rate_limited" | "retries_exhausted" | "unauthorized" | "provider_error" | "too_many_pages" | "wait_budget_exceeded",
     message: string,
     public readonly retryAfterMs?: number,
   ) {
@@ -54,6 +57,18 @@ export function parseRetryAfter(value: string | undefined, now: Date): number | 
   const date = Date.parse(text);
   if (Number.isNaN(date)) return undefined;
   return Math.max(0, date - now.getTime());
+}
+
+/** A post we can trust: usable id, real dates, and non-negative finite counters. */
+function isValid(post: ProviderPost): boolean {
+  const counters = [post.metrics?.views, post.metrics?.likes, post.metrics?.comments, post.metrics?.shares];
+  return (
+    typeof post.id === "string" &&
+    post.id !== "" &&
+    !Number.isNaN(Date.parse(post.publishedAt)) &&
+    !Number.isNaN(Date.parse(post.metricsAsOf)) &&
+    counters.every((n) => Number.isFinite(n) && n >= 0)
+  );
 }
 
 export class SyncService {
@@ -88,21 +103,22 @@ export class SyncService {
       window,
       status: "running",
       started_at: this.clock.now().toISOString(),
-      pages: 0,
       requests: 0,
+      waited_ms: 0,
       retries: [],
-      counts: { inserted: 0, updated: 0, unchanged: 0, stale: 0, duplicates_in_response: 0 },
+      counts: { inserted: 0, updated: 0, unchanged: 0, stale: 0, duplicates_in_response: 0, invalid: 0 },
     };
     this.store.addRun(run);
 
     try {
       let cursor: string | undefined;
+      let pages = 0;
       do {
-        if (run.pages >= this.config.maxPages) {
+        if (pages >= this.config.maxPages) {
           throw new SyncFailure("too_many_pages", `mais de ${this.config.maxPages} páginas, sync interrompido`);
         }
         const page = await this.fetchPage(connection, window, cursor, run);
-        run.pages += 1;
+        pages += 1;
         // Each page is saved as it arrives. A later failure keeps this progress,
         // and re-running is safe because writes are idempotent.
         this.apply(connection, page, run);
@@ -124,12 +140,16 @@ export class SyncService {
     // The provider may repeat a post inside one response. Keep the newest read.
     const unique = new Map<string, ProviderPost>();
     for (const post of page.posts) {
+      if (!isValid(post)) {
+        run.counts.invalid += 1;
+        continue;
+      }
       const seen = unique.get(post.id);
       if (seen) run.counts.duplicates_in_response += 1;
       if (!seen || Date.parse(post.metricsAsOf) > Date.parse(seen.metricsAsOf)) unique.set(post.id, post);
     }
     for (const post of unique.values()) {
-      run.counts[this.store.upsert(connection, post, run.id, this.clock.now())] += 1;
+      run.counts[this.store.upsert(connection, post, this.clock.now())] += 1;
     }
   }
 
@@ -170,6 +190,13 @@ export class SyncService {
           throw new SyncFailure("retries_exhausted", `${attempt} tentativas sem sucesso (último motivo: ${reason})`);
         }
       }
+      if (run.waited_ms + waitMs > this.config.maxTotalWaitMs) {
+        throw new SyncFailure(
+          "wait_budget_exceeded",
+          `espera total passaria de ${this.config.maxTotalWaitMs} ms (último motivo: ${reason})`,
+        );
+      }
+      run.waited_ms += waitMs;
       run.retries.push({ at: this.clock.now().toISOString(), reason, wait_ms: waitMs });
       await this.clock.sleep(waitMs);
     }
